@@ -1,211 +1,149 @@
-"use client"
+"use client";
 
-import type React from "react"
-import { createContext, useContext, useState, useEffect } from "react"
-import type { User } from "../../../types"
-import { toast } from "react-hot-toast"
-import { supabase } from "../supabaseClient"
+import { createContext, useContext, useEffect, useState, useMemo } from "react";
+import { createClient } from "@/utils/supabase/client";
+import { Session, AuthChangeEvent } from "@supabase/supabase-js";
+import { AuthContextType, AuthUser } from "../../../types";
 
-interface AuthContextType {
-  user: User | null
-  login: (email: string, password: string) => Promise<void>
-  signup: (email: string, password: string, fullName: string, businessName?: string) => Promise<void> 
-  logout: () => Promise<void>
-  signInWithGoogle: () => Promise<void>  
-  isLoading: boolean
-}
-
-const AuthContext = createContext<AuthContextType | undefined>(undefined)
+export const AuthContext = createContext<AuthContextType | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
-  const [user, setUser] = useState<User | null>(null)
-  const [isLoading, setIsLoading] = useState(true)
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [loading, setLoading] = useState(true);
+  const supabase = createClient();
+
+  /**
+   * Helper: Transforms Supabase user data into our local AuthUser type.
+   */
+  const buildUser = (sbUser: any): AuthUser => ({
+    id: sbUser.id,
+    email: sbUser.email ?? "",
+    name: sbUser.user_metadata?.full_name || sbUser.user_metadata?.name || "User",
+    avatar: sbUser.user_metadata?.avatar_url,
+  });
 
   useEffect(() => {
-    // Check active session
-    const checkSession = async () => {
+    /**
+     * initAuth: Replaces the Middleware's job by checking the session
+     * on mount and handling "Invalid Refresh Token" errors.
+     */
+    const initAuth = async () => {
       try {
-        const { data: { session } } = await supabase.auth.getSession()
+        const { data: { session }, error } = await supabase.auth.getSession();
         
+        if (error) throw error;
+
         if (session?.user) {
-          const user = {
-            id: session.user.id,
-            email: session.user.email!,
-            name: session.user.user_metadata?.full_name || 'No name',
-            avatar: session.user.user_metadata?.avatar_url || '/placeholder.svg?height=32&width=32',
-          }
-          setUser(user)
+          setUser(buildUser(session.user));
         }
-      } catch (error) {
-        console.error('Error checking session:', error)
+      } catch (error: any) {
+        // This targets the 400 error you encountered
+        if (error.message?.includes("Refresh Token Not Found") || error.status === 400) {
+          console.warn("Auth Session Expired: Cleaning up...");
+          await supabase.auth.signOut();
+          setUser(null);
+        }
       } finally {
-        setIsLoading(false)
+        setLoading(false);
       }
-    }
+    };
 
-    checkSession()
+    initAuth();
 
-    // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session?.user) {
-        const user = {
-          id: session.user.id,
-          email: session.user.email!,
-          name: session.user.user_metadata?.full_name || 'No name',
-          avatar: session.user.user_metadata?.avatar_url || '/placeholder.svg?height=32&width=32',
+    /**
+     * Listener: Updates the UI state whenever the user logs in or out.
+     */
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event: AuthChangeEvent, session: Session | null) => {
+        if (session?.user) {
+          setUser(buildUser(session.user));
+        } else {
+          setUser(null);
         }
-        setUser(user)
-      } else {
-        setUser(null)
+
+        // If a background refresh fails, ensure the app knows the user is logged out
+        if (event === 'SIGNED_OUT' || (event === 'TOKEN_REFRESHED' && !session)) {
+          setUser(null);
+        }
+
+        setLoading(false);
       }
-    })
+    );
 
     return () => {
-      subscription.unsubscribe()
-    }
-  }, [])
+      subscription.unsubscribe();
+    };
+  }, [supabase.auth]);
 
-  const login = async (email: string, password: string) => {
-    setIsLoading(true)
-
+  const login = async (email: string, password: string): Promise<void> => {
+    setLoading(true);
     try {
-      if (!email || !password) {
-        throw new Error("Email and password are required.")
-      }
-
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-      if (!emailRegex.test(email)) {
-        throw new Error("Please enter a valid email address.")
-      }
-   
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email,
-        password,
-      })
-      
-      if (error) {
-        toast.error(error.message || "Login failed")
-        throw new Error(error.message)
-      }
-
-      const user = {
-        id: data.user.id,
-        email: data.user.email!,
-        name: data.user.user_metadata?.full_name || 'No name',
-        avatar: data.user.user_metadata?.avatar_url || '/placeholder.svg?height=32&width=32',
-      }
-
-      setUser(user)
-      toast.success("Login successful!")
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
     } finally {
-      setIsLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
-  const signup = async (email: string, password: string, fullName: string, businessName?: string) => {
-    setIsLoading(true)
-
+  const signup = async (email: string, password: string, name: string): Promise<void> => {
+    setLoading(true);
     try {
-      if (!email || !password || !fullName) {
-        throw new Error("All fields are required.")
-      }
-
-      const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
-      if (!emailRegex.test(email)) {
-        throw new Error("Please enter a valid email address.")
-      }
-
-      if (password.length < 8) {
-        throw new Error("Password must be at least 8 characters long.")
-      }
-
-      const passwordRegex = /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/
-      if (!passwordRegex.test(password)) {
-        throw new Error("Password must contain at least one uppercase letter, one lowercase letter, one number, and one special character.")
-      }
-
-      const { data, error: signUpError } = await supabase.auth.signUp({
+      const { error } = await supabase.auth.signUp({
         email,
         password,
         options: {
-          data: {
-            full_name: fullName, // Fixed: was using 'name' instead of 'fullName'
-            business_name: businessName || '',
-          },
-          emailRedirectTo: `${window.location.origin}/auth/callback`, // Add callback URL
+          data: { full_name: name },
+          emailRedirectTo: `${window.location.origin}/auth/callback`,
         },
-      })
-
-      if (signUpError) {
-        if (signUpError.message.includes("already registered") || signUpError.message.includes("already been registered")) {
-          toast.error("Email already exists. Please log in.")
-          throw new Error("Email already exists. Please log in.")
-        }
-        toast.error(signUpError.message || "Signup failed")
-        throw new Error(signUpError.message)
-      }
-
-      // Check if email confirmation is required
-      if (data?.user && !data.session) {
-        toast.success("Signup successful! Please check your email to confirm your account.")
-      } else if (data?.session) {
-        toast.success("Signup successful! You are now logged in.")
-      }
+      });
+      if (error) throw error;
     } finally {
-      setIsLoading(false)
+      setLoading(false);
     }
-  }
+  };
 
-  const signInWithGoogle = async () => {
+  const signInWithGoogle = async (): Promise<void> => {
+    setLoading(true);
     try {
       const { error } = await supabase.auth.signInWithOAuth({
         provider: 'google',
-        options: { 
-          queryParams: { prompt: "select_account" },
-          redirectTo: `${window.location.origin}/auth/callback`
-        }
-      })
-      if (error) {
-        toast.error(error.message || "Google sign-in failed")
-        throw new Error(error.message)
-      }
-    } catch (err: unknown) {
-  if (err instanceof Error) {
-    console.error("Auth error:", err.message)
-  } else {
-    console.error("Auth error:", err)
-  }
-}
+        options: {
+          redirectTo: `${window.location.origin}/auth/callback`,
+          queryParams: {
+            access_type: 'offline',
+            prompt: 'select_account',
+          },
+        },
+      });
+      if (error) throw error;
+    } finally {
+      setLoading(false);
+    }
+  };
 
-  }
-
-  const logout = async () => {
+  const logout = async (): Promise<void> => {
     try {
-      await supabase.auth.signOut()
-      setUser(null)
-      toast.success("Logged out successfully")
-    } catch (error: unknown) {
-  toast.error("Error logging out")
-  if (error instanceof Error) {
-    console.error("Logout error:", error.message)
-  } else {
-    console.error("Logout error:", error)
-  }
+      await supabase.auth.signOut();
+    } finally {
+      setUser(null);
+      window.location.href = "/login"; 
+    }
+  };
+
+  const value = useMemo(() => ({ 
+    user, 
+    loading, 
+    login, 
+    signup,
+    signInWithGoogle,
+    logout 
+  }), [user, loading]);
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 
-  }
-
-  return (
-    <AuthContext.Provider value={{ user, login, signup, signInWithGoogle, logout, isLoading }}>
-      {children}
-    </AuthContext.Provider>
-  )
-}
-
-export function useAuth() {
-  const context = useContext(AuthContext)
-  if (context === undefined) {
-    throw new Error("useAuth must be used within an AuthProvider")
-  }
-  return context
-}
+export const useAuth = () => {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used within AuthProvider");
+  return ctx;
+};

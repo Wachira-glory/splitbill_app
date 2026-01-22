@@ -1,176 +1,197 @@
 "use client";
 
-import { useEffect, useState, use, useCallback } from "react";
-import { createClient } from "@supabase/supabase-js";
-import { CheckCircle, Clock, RefreshCw, XCircle, ArrowLeft, Terminal, Activity } from "lucide-react";
+import { useEffect, useState, use } from "react";
+import { CheckCircle, Clock, RefreshCw, AlertCircle, ArrowLeft } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { supabase, getUndaAuthClient } from "@/lib/supabaseClient";
 
-const undaSupa = createClient(
-  process.env.NEXT_PUBLIC_UNDA_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_UNDA_SUPABASE_ANON_KEY!
-);
+// Helper to map Unda status to local UI states
+const mapUndaStatus = (undaStatus: string): string => {
+    if (!undaStatus) return 'pending';
+    const s = undaStatus.toUpperCase();
+    if (['COMPLETED', 'SUCCESS', 'PAID'].includes(s)) return 'paid';
+    if (['PROCESSING', 'PENDING', 'INITIATED', 'SENT'].includes(s)) return 'pending';
+    if (['FAILED', 'EXPIRED', 'CANCELLED', 'REJECTED', 'DECLINED', 'ERROR'].includes(s)) return 'failed';
+    return 'pending'; 
+};
 
 export default function PaymentTrackingPage({ params }: { params: Promise<{ "bill-id": string }> }) {
-  const resolvedParams = use(params);
-  const billSlug = resolvedParams["bill-id"];
-  const router = useRouter();
+    const resolvedParams = use(params);
+    const billId = resolvedParams["bill-id"];
+    const router = useRouter();
 
-  const [bill, setBill] = useState<any>(null);
-  const [items, setItems] = useState<any[]>([]);
-  const [payments, setPayments] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [systemLogs, setSystemLogs] = useState<string[]>([]);
+    const [bill, setBill] = useState<any>(null);
+    const [participants, setParticipants] = useState<any[]>([]);
+    const [loading, setLoading] = useState(true);
 
-  const addLog = (msg: string) => {
-    setSystemLogs(prev => [`${new Date().toLocaleTimeString()} » ${msg}`, ...prev].slice(0, 5));
-  };
+    const fetchBill = async (isSilent = false) => {
+        try {
+            if (!isSilent) setLoading(true);
+            
+            // Get the pre-authenticated Unda client from your lib
+            const authSupa = await getUndaAuthClient();
 
-  const syncUndaTruth = useCallback(async () => {
-    try {
-      const authRes = await fetch(`${process.env.NEXT_PUBLIC_UNDA_SUPABASE_URL}/auth/v1/token?grant_type=password`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "apikey": process.env.NEXT_PUBLIC_UNDA_SUPABASE_ANON_KEY! },
-        body: JSON.stringify({
-          email: process.env.NEXT_PUBLIC_UNDA_API_USERNAME,
-          password: process.env.NEXT_PUBLIC_UNDA_API_PASSWORD,
-        })
-      });
-      const { access_token } = await authRes.json();
+            // 1. Fetch Account Details
+            const { data: accData, error: accError } = await authSupa
+                .from("accounts")
+                .select("id, uid, data, balance")
+                .eq("slug", billId)
+                .single();
 
-      const { data: accData } = await undaSupa
-        .from("accounts")
-        .select("*, items(*)")
-        .eq("slug", billSlug)
-        .eq("p_id", 23)
-        .setHeader('Authorization', `Bearer ${access_token}`)
-        .maybeSingle();
+            if (accError || !accData) {
+                console.error("DEBUG: Account Query Error:", accError);
+                return;
+            }
 
-      if (accData) {
-        setBill(accData);
-        setItems(accData.items || []);
+            setBill({
+                bill_name: accData.data?.name || "Bill",
+                total_amount: accData.data?.total_goal || 0,
+                paybill: accData.uid
+            });
 
-        const { data: payData, error: payError } = await undaSupa
-          .from("payments")
-          .select("*")
-          .eq("to_ac_id", accData.id) 
-          .order('created_at', { ascending: false })
-          .setHeader('Authorization', `Bearer ${access_token}`);
+            // 2. Fetch Payments associated with this Account ID
+            const { data: payments, error: payError } = await authSupa
+                .from("payments")
+                .select("*")
+                .or(`from_ac_id.eq.${accData.id},to_ac_id.eq.${accData.id}`);
 
-        if (payError) throw payError;
-        
-        setPayments(payData || []);
-        addLog(`Gateway Synced: Found ${payData?.length || 0} transaction attempts`);
-      }
-    } catch (err: any) {
-      addLog(`Sync Error: Gateway Unreachable`);
-    } finally {
-      setLoading(false);
-    }
-  }, [billSlug]);
+            if (payError) {
+                console.error("DEBUG: Payments Query Error:", payError);
+            }
 
-  useEffect(() => {
-    syncUndaTruth();
-    const interval = setInterval(syncUndaTruth, 4000);
-    return () => clearInterval(interval);
-  }, [syncUndaTruth]);
+            if (payments && payments.length > 0) {
+                const mapped = payments.map(p => {
+                    let displayName = "Participant";
 
-  const resolveStatus = (item: any) => {
-    const phone = item.data?.phone?.replace(/\D/g, '').slice(-9);
-    const payment = payments.find(p => {
-      const pPhone = (p.data?.phone || p.idata?.customer_no || p.reference)?.replace(/\D/g, '').slice(-9);
-      return pPhone === phone;
-    });
+                    // Name Extraction Logic
+                    const dataName = p.data?.details?.customer_name || p.data?.details?.source || p.data?.customer_name;
+                    const idataName = p.idata?.customer_name || p.idata?.full_name;
+                    const message = p.data?.details?.message || p.details || "";
 
-    if (!payment) return 'pending';
-    const s = payment.status?.toLowerCase();
-    if (s === 'completed' || s === 'paid' || payment.idata?.ResultCode === "0") return 'paid';
-    if (s === 'cancelled' || s === 'failed' || payment.idata?.ResultCode === "1032") return 'failed';
-    return 'processing';
-  };
+                    if (dataName) {
+                        displayName = dataName;
+                    } else if (idataName) {
+                        displayName = idataName;
+                    } else if (message.includes("SplitBill: ")) {
+                        displayName = message.split("SplitBill: ")[1];
+                    }
 
-  if (loading) return (
-    <div className="min-h-screen bg-white flex flex-col items-center justify-center">
-      <Activity className="animate-pulse text-blue-600 mb-2" size={32} />
-      <p className="font-bold text-gray-400 text-[10px] tracking-widest uppercase">Initializing Unda Feed</p>
-    </div>
-  );
+                    return {
+                        id: p.id,
+                        name: displayName,
+                        phone: p.uid, 
+                        amount: p.amount,
+                        status: mapUndaStatus(p.status)
+                    };
+                });
+                setParticipants(mapped);
+            } else {
+                // Fallback to showing participants from account metadata if no payments exist yet
+                if (accData.data?.participants) {
+                    const fallback = accData.data.participants.map((p: any) => ({
+                        name: p.name,
+                        phone: p.phone,
+                        amount: p.target_amount || p.amount,
+                        status: 'pending'
+                    }));
+                    setParticipants(fallback);
+                }
+            }
+        } catch (err) {
+            console.error("DEBUG: Unexpected System Error:", err);
+        } finally {
+            if (!isSilent) setLoading(false);
+        }
+    };
 
-  return (
-    <div className="min-h-screen bg-[#FDFCFE] text-slate-900 p-4 md:p-8">
-      <div className="max-w-lg mx-auto">
-        
-        <button onClick={() => router.back()} className="mb-8 flex items-center gap-2 text-slate-400 font-bold text-xs hover:text-blue-600 transition-colors uppercase tracking-widest">
-          <ArrowLeft size={14} /> Back to History
-        </button>
+    useEffect(() => {
+        if (billId) {
+            fetchBill();
+            // Poll every 3 seconds for real-time status updates
+            const interval = setInterval(() => fetchBill(true), 3000);
+            return () => clearInterval(interval);
+        }
+    }, [billId]);
 
-        {/* Bill Info */}
-        <div className="mb-10">
-          <div className="flex justify-between items-start">
-            <div>
-              <h1 className="text-4xl font-black tracking-tighter text-slate-900 leading-none">{bill?.data?.name || "Payment"}</h1>
-              <p className="text-[10px] font-mono text-slate-400 mt-2">ACCOUNT_ID: {bill?.id}</p>
-            </div>
-            <div className="bg-green-500/10 text-green-600 px-3 py-1 rounded-full text-[10px] font-black border border-green-500/20">LIVE_SYNC</div>
-          </div>
+    if (loading) return (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50">
+            <RefreshCw className="animate-spin text-purple-600 mb-4" size={48} />
+            <p className="text-gray-500 font-bold">Synchronizing Tracker...</p>
         </div>
+    );
 
-        {/* Participants */}
-        <div className="space-y-4 mb-12">
-          <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] ml-2">Participants</h3>
-          {items.map((item) => {
-            const status = resolveStatus(item);
-            return (
-              <div key={item.id} className="bg-white rounded-[1.5rem] p-5 flex items-center justify-between border border-slate-100 shadow-sm transition-all hover:shadow-md">
-                <div className="flex items-center gap-4">
-                  <div className={`w-12 h-12 rounded-2xl flex items-center justify-center font-black text-xl ${
-                    status === 'paid' ? 'bg-green-50 text-green-600' : 'bg-slate-50 text-slate-300'
-                  }`}>
-                    {item.data?.name?.charAt(0)}
-                  </div>
-                  <div>
-                    <h4 className="font-bold text-slate-800">{item.data?.name}</h4>
-                    <p className="text-[10px] font-mono text-slate-400">{item.data?.phone}</p>
-                  </div>
+    const paidCount = participants.filter(p => p.status === "paid").length;
+    const progress = participants.length > 0 ? (paidCount / participants.length) * 100 : 0;
+
+    return (
+        <div className="min-h-screen bg-gradient-to-br from-purple-50 to-blue-50 p-4">
+            <div className="max-w-4xl mx-auto pt-8">
+                <button 
+                    onClick={() => router.push('/dashboard/bills')} 
+                    className="flex items-center gap-2 text-purple-600 font-bold mb-6 hover:translate-x-[-4px] transition-transform"
+                >
+                    <ArrowLeft size={20} /> Back to Ledger
+                </button>
+
+                <div className="bg-white rounded-3xl shadow-xl p-8 mb-6 border border-white">
+                    <div className="flex justify-between items-start">
+                        <div>
+                            <h2 className="text-3xl font-black text-gray-800">{bill?.bill_name}</h2>
+                            <p className="text-4xl font-black text-purple-600">KES {bill?.total_amount?.toLocaleString()}</p>
+                        </div>
+                        <div className="text-right">
+                            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Status</p>
+                            <p className="font-bold text-slate-900">{paidCount} of {participants.length} Paid</p>
+                        </div>
+                    </div>
+                    
+                    <div className="mt-6">
+                        <div className="flex justify-between mb-2">
+                            <span className="text-xs font-bold text-slate-500">{progress.toFixed(0)}% Collected</span>
+                        </div>
+                        <div className="bg-gray-100 h-3 rounded-full overflow-hidden">
+                            <div 
+                                className="bg-green-500 h-full transition-all duration-700 ease-out" 
+                                style={{ width: `${progress}%` }}
+                            ></div>
+                        </div>
+                    </div>
                 </div>
-                <div className="text-right">
-                  <p className="font-black text-slate-900">KES {item.amount}</p>
-                  <StatusBadge status={status} />
+
+                <div className="space-y-3">
+                    {participants.map((p, idx) => (
+                        <div key={idx} className="bg-white rounded-2xl p-5 flex items-center justify-between border border-white shadow-sm hover:shadow-md transition-shadow">
+                            <div className="flex items-center gap-4">
+                                <div className={`w-12 h-12 rounded-full flex items-center justify-center text-white font-bold ${p.status === 'paid' ? 'bg-green-500' : 'bg-purple-600'}`}>
+                                    {p.name.charAt(0)}
+                                </div>
+                                <div>
+                                    <h3 className="font-bold text-gray-800">{p.name}</h3>
+                                    <p className="text-xs text-gray-500 font-mono">{p.phone}</p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-6">
+                                <p className="text-xl font-black text-slate-900">KES {p.amount?.toLocaleString()}</p>
+                                <div className="w-28 flex justify-end">
+                                    {p.status === 'paid' ? (
+                                        <span className="bg-green-50 text-green-600 px-3 py-1 rounded-full font-bold text-xs flex items-center gap-1">
+                                            <CheckCircle size={14}/> Paid
+                                        </span>
+                                    ) : p.status === 'failed' ? (
+                                        <span className="bg-red-50 text-red-600 px-3 py-1 rounded-full font-bold text-xs flex items-center gap-1">
+                                            <AlertCircle size={14}/> Failed
+                                        </span>
+                                    ) : (
+                                        <span className="bg-amber-50 text-amber-600 px-3 py-1 rounded-full font-bold text-xs flex items-center gap-1">
+                                            <Clock size={14} className="animate-pulse"/> Pending
+                                        </span>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    ))}
                 </div>
-              </div>
-            );
-          })}
-        </div>
-
-        {/* Integrated System Logs */}
-        <div className="space-y-4">
-          <div className="flex items-center justify-between ml-2">
-            <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em]">Gateway Activity</h3>
-            <Terminal size={14} className="text-slate-300" />
-          </div>
-          <div className="bg-slate-900 rounded-[1.5rem] p-6 shadow-xl border border-white/5">
-            <div className="space-y-2 font-mono text-[10px]">
-              {systemLogs.length > 0 ? (
-                systemLogs.map((log, i) => (
-                  <div key={i} className={`flex gap-3 ${i === 0 ? "text-blue-400" : "text-slate-500"}`}>
-                    <span className="opacity-30">[{systemLogs.length - i}]</span>
-                    <span>{log}</span>
-                  </div>
-                ))
-              ) : (
-                <div className="text-slate-600 italic">Waiting for gateway handshake...</div>
-              )}
             </div>
-          </div>
         </div>
-
-      </div>
-    </div>
-  );
-}
-
-function StatusBadge({ status }: { status: string }) {
-  if (status === 'paid') return <span className="text-green-500 text-[9px] font-black flex items-center gap-1 justify-end uppercase mt-1 tracking-tighter"><CheckCircle size={12}/> Success</span>;
-  if (status === 'failed') return <span className="text-red-500 text-[9px] font-black flex items-center gap-1 justify-end uppercase mt-1 tracking-tighter"><XCircle size={12}/> Cancelled</span>;
-  if (status === 'processing') return <span className="text-blue-500 text-[9px] font-black flex items-center gap-1 justify-end uppercase mt-1 tracking-tighter"><RefreshCw size={12} className="animate-spin"/> STK Active</span>;
-  return <span className="text-slate-300 text-[9px] font-black flex items-center gap-1 justify-end uppercase mt-1 tracking-tighter"><Clock size={12}/> No Attempt</span>;
+    );
 }

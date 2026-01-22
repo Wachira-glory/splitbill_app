@@ -3,7 +3,14 @@ import { createClient } from '@supabase/supabase-js';
 
 export async function POST(req: Request) {
   try {
-    const { customer_no, amount, reference, account_id, channel_id } = await req.json();
+    const { 
+      customer_no, 
+      customer_name, 
+      amount, 
+      reference, 
+      account_id, 
+      channel_id 
+    } = await req.json();
 
     const UNDA_URL = process.env.NEXT_PUBLIC_UNDA_SUPABASE_URL;
     const UNDA_ANON_KEY = process.env.NEXT_PUBLIC_UNDA_SUPABASE_ANON_KEY;
@@ -18,21 +25,41 @@ export async function POST(req: Request) {
         password: process.env.UNDA_API_PASSWORD
       })
     });
-    const { access_token: token } = await authRes.json();
+    
+    const authData = await authRes.json();
+    const token = authData.access_token;
 
-    // Fetch the RAW api_key from the base 'channels' table
-    // We use the ID passed from the frontend to find the real key
+    if (!token) {
+      return NextResponse.json({ error: "Authentication failed" }, { status: 401 });
+    }
+
+    // 2. Fetch the RAW api_key from the base 'channels' table
     const supabase = createClient(UNDA_URL!, UNDA_ANON_KEY!);
-    const { data: channel } = await supabase
+    const { data: channel, error: channelError } = await supabase
       .from('channels')
       .select('api_key')
       .eq('id', channel_id)
       .single()
       .setHeader('Authorization', `Bearer ${token}`);
 
-    if (!channel?.api_key) return NextResponse.json({ error: "Channel not found" }, { status: 404 });
+    if (channelError || !channel?.api_key) {
+      return NextResponse.json({ error: "Channel not found" }, { status: 404 });
+    }
 
-    // 3. Request the STK Push using the RAW key
+    // 3. Prepare the payload
+    // 'to_ac_id' ensures the payment is linked to the account for automatic reconciliation
+    const payload = {
+      customer_no,
+      amount: Number(amount),
+      reference: reference,
+      to_ac_id: Number(account_id), 
+      details: {
+        customer_name: customer_name,
+        app_source: "SplitBill"
+      }
+    };
+
+    // 4. Request the STK Push using the public endpoint
     const chargeResponse = await fetch(
       `${UNDA_URL}/functions/v1/api-public-channels-mpesa-charge-req?api_key=${channel.api_key}`,
       {
@@ -43,12 +70,7 @@ export async function POST(req: Request) {
           'Authorization': `Bearer ${token}`,
           'x-platform-uid': PLATFORM_UID
         },
-        body: JSON.stringify({
-          customer_no,
-          amount: Number(amount),
-          reference,
-          details: `SplitBill: ${reference}`
-        })
+        body: JSON.stringify(payload)
       }
     );
 
@@ -56,6 +78,7 @@ export async function POST(req: Request) {
     return NextResponse.json(chargeResult, { status: chargeResponse.status });
 
   } catch (error: any) {
+    console.error("Charge API Error:", error);
     return NextResponse.json({ error: { message: error.message } }, { status: 500 });
   }
 }

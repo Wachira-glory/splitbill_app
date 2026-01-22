@@ -17,6 +17,23 @@ export interface Transaction {
   customerName?: string
 }
 
+export interface AuthUser {
+  id: string;
+  email: string;
+  name?: string;
+  avatar?: string;
+}
+
+export interface AuthContextType {
+  user: AuthUser | null;
+  loading: boolean;
+  // Add these three lines specifically:
+  login: (email: string, password: string) => Promise<void>;
+  signup: (email: string, password: string, name: string) => Promise<void>;
+  signInWithGoogle: () => Promise<void>;
+  logout: () => Promise<void>;
+}
+
 export interface PayLink {
   id: string
   purpose: string

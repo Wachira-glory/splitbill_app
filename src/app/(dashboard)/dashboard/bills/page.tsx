@@ -1,46 +1,71 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { createClient } from "@supabase/supabase-js";
-import { Receipt, Loader2, Plus, ChevronRight, CheckCircle2, Clock } from "lucide-react";
+import { Receipt, Loader2, ChevronRight, CheckCircle2, Clock } from "lucide-react";
 import { useRouter } from "next/navigation";
-
-const supabaseUrl = process.env.NEXT_PUBLIC_UNDA_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_UNDA_SUPABASE_ANON_KEY!;
+import { supabase, getUndaAuthClient } from "@/lib/supabaseClient";
 
 export default function BillsDashboard() {
   const router = useRouter();
   const [bills, setBills] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const getAuthClient = async () => {
-    const response = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=password`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "apikey": supabaseAnonKey },
-      body: JSON.stringify({
-        email: process.env.NEXT_PUBLIC_UNDA_API_USERNAME,
-        password: process.env.NEXT_PUBLIC_UNDA_API_PASSWORD,
-      })
-    });
-    const data = await response.json();
-    return createClient(supabaseUrl, supabaseAnonKey, {
-      global: { headers: { Authorization: `Bearer ${data.access_token}` } }
-    });
-  };
-
   const fetchBills = async () => {
     setLoading(true);
     try {
-      const authSupa = await getAuthClient();
+      const { data: { user } } = await supabase.auth.getUser();
+
+      if (!user) {
+        console.warn("You have not logged in found. Please log in.");
+        setLoading(false);
+        return;
+      }
+
+      console.log(" Current  User ID:", user.id);
+
       
-      const { data, error } = await authSupa
+      const authSupa = await getUndaAuthClient();
+      
+      // Here I fetch accounts filtered by the owner_id stored that ar stored in 'data' JSON field
+      const { data: accounts, error: accError } = await authSupa
         .from("accounts")
         .select(`id, slug, balance, data, p_id, created_at`)
-        .eq("p_id", 23) 
-        .order("created_at", { ascending: false });
+        .eq("p_id", 23)
+        .order("created_at", { ascending: false }); 
 
-      if (error) throw error;
-      setBills(data || []);
+      if (accError) throw accError;
+
+      // The we fetch Payments only if accounts were found
+      const accountIds = accounts.map(a => a.id);
+      if (accountIds.length === 0) {
+        setBills([]);
+        setLoading(false);
+        return;
+      }
+
+      const { data: payments, error: payError } = await authSupa
+        .from("payments")
+        .select("to_ac_id, amount, status")
+        .in("to_ac_id", accountIds);
+
+      if (payError) throw payError;
+
+      const enrichedBills = accounts.map(acc => {
+        const successfulPayments = (payments || []).filter(p => {
+          const s = p.status?.toUpperCase();
+          return p.to_ac_id === acc.id && ['SUCCESS', 'PAID', 'COMPLETED'].includes(s);
+        });
+
+        const realTimeCollected = successfulPayments.reduce((sum, p) => sum + p.amount, 0);
+
+        return {
+          ...acc,
+          real_collected: realTimeCollected 
+        };
+      })
+      .sort((a, b) => b.id - a.id); 
+
+      setBills(enrichedBills);
     } catch (err) {
       console.error("Dashboard Fetch Error:", err);
     } finally {
@@ -59,12 +84,6 @@ export default function BillsDashboard() {
           <h1 className="text-4xl font-black text-slate-900 tracking-tight">Bill Ledger</h1>
           <p className="text-slate-400 font-medium mt-1">Track collections vs goals</p>
         </div>
-        <button 
-          onClick={() => router.push('/create')}
-          className="bg-black text-white px-6 py-3 rounded-2xl font-bold flex items-center gap-2 hover:bg-slate-800 transition-all shadow-lg shadow-black/10"
-        >
-          <Plus size={20} /> New Bill
-        </button>
       </div>
 
       {loading ? (
@@ -79,13 +98,12 @@ export default function BillsDashboard() {
       ) : (
         <div className="grid gap-6">
           {bills.map((bill) => {
-            // LOGIC: Goal is what we want, Balance is what we have collected
             const goal = bill.data?.total_goal || 0;
-            const collected = bill.balance || 0;
+            const collected = bill.real_collected || 0;
             const remaining = Math.max(goal - collected, 0);
-            
-            // Percentage Calculation
             const progressPercent = goal > 0 ? Math.min((collected / goal) * 100, 100) : 0;
+            
+            // Reconciliation logic
             const isFullyPaid = collected >= goal && goal > 0;
 
             return (
@@ -125,7 +143,6 @@ export default function BillsDashboard() {
                   </div>
                 </div>
 
-                {/* Progress Bar Section */}
                 <div className="mt-8">
                   <div className="flex justify-between items-end mb-2">
                     <p className="text-sm font-bold text-slate-500">{progressPercent.toFixed(0)}% Complete</p>
