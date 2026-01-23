@@ -1,6 +1,7 @@
 "use client"
 
 import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { MirrorBill,UndaAccount } from '../../../../types';
 import { 
   DollarSign, 
   History, 
@@ -22,7 +23,8 @@ import {
   ArrowRight
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import { createClient } from '@supabase/supabase-js';
+import { createClient as createSupabaseClient} from '@supabase/supabase-js';
+import { createClient as createLocalClient } from '@/utils/supabase/client';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,10 +35,15 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Button } from '@/components/ui/button';
 
-const undaSupa = createClient(
+
+const undaSupa = createSupabaseClient(
   process.env.NEXT_PUBLIC_UNDA_SUPABASE_URL!,
   process.env.NEXT_PUBLIC_UNDA_SUPABASE_ANON_KEY!
 );
+
+
+const mySupa = createLocalClient();
+
 
 const DashboardPage = () => {
     const router = useRouter();
@@ -46,7 +53,6 @@ const DashboardPage = () => {
     const [currentPage, setCurrentPage] = useState(1);
     const itemsPerPage = 6;
 
-    // --- DATA CALCULATIONS ---
     const metrics = useMemo(() => {
         const totalGoal = bills.reduce((sum, b) => sum + (b.balance || 0), 0);
         const totalCollected = bills.reduce((sum, b) => {
@@ -62,33 +68,71 @@ const DashboardPage = () => {
         return { totalCollected, activeBills, progress, totalGoal };
     }, [bills]);
 
-    const fetchBills = useCallback(async () => {
-        setIsLoading(true);
-        try {
-            const response = await fetch(`${process.env.NEXT_PUBLIC_UNDA_SUPABASE_URL}/auth/v1/token?grant_type=password`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json", "apikey": process.env.NEXT_PUBLIC_UNDA_SUPABASE_ANON_KEY! },
-                body: JSON.stringify({
-                    email: process.env.NEXT_PUBLIC_UNDA_API_USERNAME,
-                    password: process.env.NEXT_PUBLIC_UNDA_API_PASSWORD,
-                })
-            });
-            const authData = await response.json();
-            
-            const { data, error } = await undaSupa
-                .from('accounts')
-                .select('*, items(*)')
-                .eq('p_id', 23) 
-                .order('created_at', { ascending: false })
-                .setHeader('Authorization', `Bearer ${authData.access_token}`);
-            
-            if (!error) setBills(data || []);
-        } catch (error) {
-            console.error('Error:', error);
-        } finally {
+
+const fetchBills = useCallback(async () => {
+    setIsLoading(true);
+    try {
+        // --- STEP 1: Fetch from YOUR PRIVATE MIRROR ---
+        const { data: mirrorData, error: mirrorError } = await mySupa
+            .from('unda_bills_mirror')
+            .select('*')
+            .order('updated_at', { ascending: false });
+
+        if (mirrorError) throw mirrorError;
+
+        if (!mirrorData || mirrorData.length === 0) {
+            setBills([]);
             setIsLoading(false);
+            return;
         }
-    }, []);
+
+        // --- STEP 2: Get Unda Auth Token ---
+        const response = await fetch(`${process.env.NEXT_PUBLIC_UNDA_SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "apikey": process.env.NEXT_PUBLIC_UNDA_SUPABASE_ANON_KEY! },
+            body: JSON.stringify({
+                email: process.env.NEXT_PUBLIC_UNDA_API_USERNAME,
+                password: process.env.NEXT_PUBLIC_UNDA_API_PASSWORD,
+            })
+        });
+        const authData = await response.json();
+        
+        // --- STEP 3: Fetch Targeted Data from Unda ---
+        // Explicitly typed 'b' as MirrorBill to resolve ts(7006)
+        const slugs = mirrorData.map((b: MirrorBill) => b.slug);
+
+        const { data: undaAccounts, error: undaError } = await undaSupa
+            .from('accounts')
+            .select('*, items(*)')
+            .in('slug', slugs)
+            .eq('p_id', 23)
+            .setHeader('Authorization', `Bearer ${authData.access_token}`);
+        
+        if (undaError) throw undaError;
+
+        // --- STEP 4: Enrich Mirror Data ---
+        // Explicitly typed 'mirror' as MirrorBill to resolve ts(7006)
+        const enriched = mirrorData.map((mirror: MirrorBill) => {
+            // Typed 'ua' as UndaAccount for safety
+            const undaMatch = undaAccounts?.find((ua: UndaAccount) => ua.slug === mirror.slug);
+            
+            return {
+                ...mirror,
+                items: undaMatch?.items || [],
+                balance: mirror.total_goal,
+                data: { name: mirror.bill_name } 
+            };
+        });
+
+        setBills(enriched);
+
+    } catch (error) {
+        console.error('Dashboard Privacy Fetch Error:', error);
+    } finally {
+        setIsLoading(false);
+    }
+}, []);
+
 
     useEffect(() => { fetchBills(); }, [fetchBills]);
 

@@ -1,161 +1,200 @@
-
-
-
-
-
-
-
 "use client"
 
-import React, { useState, useEffect } from 'react';
-import { createClient } from '@supabase/supabase-js';
-import { Plus, Power, CreditCard, Loader2, CheckCircle2, AlertCircle } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { CreditCard, Power, Plus, CheckCircle2, Loader2, AlertTriangle } from 'lucide-react';
+import { supabase, getUndaAuthClient } from "@/lib/supabaseClient"; 
 
-// Connect to the Unda Supabase Project
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_UNDA_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_UNDA_SUPABASE_ANON_KEY!
-);
+interface Channel {
+  id: number;
+  uid: string;
+  name: string;
+  idata: {
+    is_default: boolean;
+    owner_id: string;
+  };
+}
 
 export default function ChannelManager() {
-  const [channels, setChannels] = useState<any[]>([]);
+  const [channels, setChannels] = useState<Channel[]>([]);
   const [loading, setLoading] = useState(true);
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const [newPaybill, setNewPaybill] = useState('');
-  const [channelName, setChannelName] = useState('');
+  const [isCreating, setIsCreating] = useState(false);
+  const [newUid, setNewUid] = useState(''); 
+  const [newName, setNewName] = useState('');
   const [error, setError] = useState<string | null>(null);
+
+  // FETCH: Uses the user.id to filter Unda channels privately
+  const fetchChannels = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      // Get the current user from SplitBill
+      const { data: { user } } = await supabase.auth.getUser();
+      
+      if (!user) {
+        setError("Please login to manage channels.");
+        setLoading(false);
+        return;
+      }
+
+      const authSupa = await getUndaAuthClient();
+      
+      // Filter Unda channels by Project 23 AND your specific user ID
+      const { data, error: fetchError } = await authSupa
+        .from('channels')
+        .select('*')
+        .eq('p_id', 23)
+        .filter('idata->>owner_id', 'eq', user.id); // Remote filtering
+
+      if (fetchError) throw fetchError;
+      setChannels(data || []);
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
 
   useEffect(() => {
     fetchChannels();
-  }, []);
+  }, [fetchChannels]);
 
-  async function fetchChannels() {
-    setError(null);
-    // 1. Get the session to ensure a JWT is present for RLS
-    const { data: { session } } = await supabase.auth.getSession();
-    
-    if (!session) {
-      setError("Please log in to manage channels");
-      setLoading(false);
-      return;
-    }
-
-    // 2. Query only Project 23 channels
-    const { data, error: fetchError } = await supabase
-      .from('channels')
-      .select('*')
-      .eq('p_id', 23); 
-
-    if (fetchError) {
-      setError(fetchError.message);
-    } else if (data) {
-      setChannels(data);
-    }
-    setLoading(false);
-  }
-
+  // CREATE: Adds a new Paybill stamped with your User ID
   const handleCreateChannel = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-    setError(null);
+  e.preventDefault();
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return setError("Login required");
+
+  setIsCreating(true);
+  try {
+    const authSupa = await getUndaAuthClient();
     
-    // 3. Create a new child channel for Mpesa
-    const { error: insertError } = await supabase.from('channels').insert([{
-      p_id: 23,
-      uid: newPaybill,
-      name: channelName,
-      provider: 'mpesa',
-      category: 'inbound',
-      mode: 'child',
-      parent_channel_id: 2, // Hardcoded per requirement
-      status: 'active',
-      idata: { is_default: false }
-    }]);
+    // FIX: Append a short hash or the User ID to the UID 
+    // to bypass the unique constraint in a shared project.
+    // We keep the actual Paybill number in a separate metadata field if needed.
+    const uniqueUid = `${newUid}-${user.id.substring(0, 5)}`;
+
+    const { error: insertError } = await authSupa
+      .from('channels')
+      .insert([{
+        p_id: 23,
+        uid: uniqueUid, // This is now unique to THIS user
+        name: newName,
+        provider: 'mpesa',
+        category: 'inbound',
+        mode: 'child',
+        parent_channel_id: 2, 
+        status: 'active',
+        idata: { 
+          is_default: false,
+          owner_id: user.id,
+          display_uid: newUid // Keep the clean Paybill number for the UI
+        } 
+      }]);
 
     if (insertError) {
-      setError(insertError.message);
-    } else {
-      setNewPaybill('');
-      setChannelName('');
-      fetchChannels();
+        if (insertError.code === '23505') {
+            throw new Error("This Paybill is already registered under your account.");
+        }
+        throw insertError;
     }
-    setIsSubmitting(false);
-  };
 
-  const toggleDefault = async (selectedId: number) => {
-    setError(null);
+    setNewUid(''); 
+    setNewName('');
+    fetchChannels();
+  } catch (err: any) {
+    setError(err.message);
+  } finally {
+    setIsCreating(false);
+  }
+};
+
+  // DEFAULT: Set one channel as active for THIS user
+  const setDefaultChannel = async (channelId: number) => {
     try {
-      // 4. Update all channels to 'not default' first
-      const resetPromises = channels.map(channel => 
-        supabase.from('channels')
-          .update({ idata: { ...channel.idata, is_default: false } })
-          .eq('id', channel.id)
-      );
-      await Promise.all(resetPromises);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (!user) return;
 
-      // 5. Set the chosen channel as the default
-      const target = channels.find(c => c.id === selectedId);
-      await supabase.from('channels')
-        .update({ idata: { ...target.idata, is_default: true } })
-        .eq('id', selectedId);
+      const authSupa = await getUndaAuthClient();
 
+      // 1. Reset all your channels to false
+      for (const ch of channels) {
+        await authSupa
+          .from('channels')
+          .update({ idata: { ...ch.idata, is_default: false } })
+          .eq('id', ch.id);
+      }
+
+      // 2. Set the selected one to true
+      const target = channels.find(c => c.id === channelId);
+      if (target) {
+        await authSupa
+          .from('channels')
+          .update({ idata: { ...target.idata, is_default: true } })
+          .eq('id', channelId);
+      }
+      
       fetchChannels();
     } catch (err: any) {
-      setError("Failed to update default channel");
+      setError(err.message);
     }
   };
 
-  if (loading) return <div className="p-4 text-slate-400 text-xs animate-pulse">Loading Channels...</div>;
-
   return (
-    <div className="w-full space-y-6">
+    <div className="max-w-2xl mx-auto p-6 space-y-8">
       {error && (
-        <div className="bg-red-50 text-red-600 p-3 rounded-xl text-xs flex items-center gap-2">
-          <AlertCircle size={14} /> {error}
+        <div className="bg-red-50 p-4 rounded-xl text-red-600 flex items-center gap-2 font-bold">
+          <AlertTriangle size={20} /> {error}
         </div>
       )}
 
-      {/* Input Section */}
-      <div className="bg-slate-50 p-6 rounded-[1.5rem] border border-slate-100">
-        <h3 className="text-sm font-black mb-4 flex items-center gap-2">
-          <Plus size={16} className="text-purple-600" /> Register Paybill
-        </h3>
-        <form onSubmit={handleCreateChannel} className="space-y-3">
-          <input 
-            required placeholder="Channel Nickname" 
-            className="w-full p-3 bg-white rounded-xl text-xs border-none outline-none font-bold shadow-sm"
-            value={channelName} onChange={e => setChannelName(e.target.value)}
-          />
-          <input 
-            required placeholder="Paybill Number" 
-            className="w-full p-3 bg-white rounded-xl text-xs border-none outline-none font-mono shadow-sm"
-            value={newPaybill} onChange={e => setNewPaybill(e.target.value)}
-          />
-          <button className="w-full py-3 bg-slate-900 text-white text-xs font-black rounded-xl hover:bg-purple-600 transition-all">
-            {isSubmitting ? <Loader2 className="animate-spin mx-auto" size={16} /> : 'Save Channel'}
+      <div className="bg-white rounded-[2rem] p-8 shadow-xl border border-slate-100">
+        <h2 className="text-2xl font-black text-slate-900 mb-6 flex items-center gap-2">
+          <Plus className="text-purple-600" /> Register Paybill
+        </h2>
+        <form onSubmit={handleCreateChannel} className="space-y-4">
+          <div className="space-y-1">
+            <label className="text-[10px] font-black text-slate-400 uppercase ml-2">Business Name</label>
+            <input required placeholder="e.g. My Shop" className="w-full p-4 bg-slate-50 rounded-xl outline-none font-bold focus:ring-2 ring-purple-100 transition-all" value={newName} onChange={e => setNewName(e.target.value)} />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-black text-slate-400 uppercase ml-2">Paybill / Till Number</label>
+            <input required placeholder="e.g. 123456" className="w-full p-4 bg-slate-50 rounded-xl outline-none font-mono focus:ring-2 ring-purple-100 transition-all" value={newUid} onChange={e => setNewUid(e.target.value)} />
+          </div>
+          <button disabled={isCreating} className="w-full py-4 bg-slate-900 text-white font-black rounded-xl hover:bg-purple-600 disabled:opacity-50 transition-all flex items-center justify-center gap-2">
+            {isCreating ? <Loader2 className="animate-spin" /> : 'Add My Paybill'}
           </button>
         </form>
       </div>
 
-      {/* List Section */}
-      <div className="space-y-2">
-        {channels.map(channel => (
-          <div key={channel.id} className={`p-4 rounded-2xl border flex items-center justify-between transition-all ${channel.idata?.is_default ? 'bg-purple-50 border-purple-200' : 'bg-white border-slate-100'}`}>
-            <div className="flex items-center gap-3">
-              <CreditCard size={16} className={channel.idata?.is_default ? 'text-purple-600' : 'text-slate-400'} />
-              <div>
-                <p className="text-xs font-black text-slate-900">{channel.name}</p>
-                <p className="text-[10px] font-mono text-slate-500">{channel.uid}</p>
-              </div>
-            </div>
-            <button 
-              onClick={() => toggleDefault(channel.id)}
-              className={`px-3 py-1.5 rounded-lg font-black text-[10px] flex items-center gap-1 ${channel.idata?.is_default ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-500'}`}
-            >
-              {channel.idata?.is_default ? <><CheckCircle2 size={12}/> Default</> : <><Power size={12}/> Enable</>}
-            </button>
+      <div className="space-y-4">
+        <h3 className="text-sm font-black text-slate-400 uppercase tracking-widest ml-4">My Registered Channels</h3>
+        {loading ? (
+          <div className="flex justify-center py-10"><Loader2 className="animate-spin text-purple-600" /></div>
+        ) : channels.length === 0 ? (
+          <div className="p-10 text-center bg-slate-50 rounded-[2rem] border-2 border-dashed text-slate-400 font-bold">
+            No Paybills registered yet.
           </div>
-        ))}
+        ) : (
+          channels.map(channel => (
+            <div key={channel.id} className={`p-6 rounded-[2rem] border-2 flex items-center justify-between transition-all ${channel.idata?.is_default ? 'bg-purple-50 border-purple-200' : 'bg-white border-slate-50'}`}>
+              <div className="flex items-center gap-4">
+                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${channel.idata?.is_default ? 'bg-purple-600 text-white' : 'bg-slate-100 text-slate-400'}`}>
+                  <CreditCard size={24} />
+                </div>
+                <div>
+                  <p className="font-black text-slate-900">{channel.name}</p>
+                  <p className="text-xs font-mono font-bold text-slate-500">{channel.uid}</p>
+                </div>
+              </div>
+              <button 
+                onClick={() => setDefaultChannel(channel.id)} 
+                className={`px-6 py-3 rounded-xl font-black text-xs transition-all flex items-center gap-2 ${channel.idata?.is_default ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}
+              >
+                {channel.idata?.is_default ? <><CheckCircle2 size={16}/> Active</> : <><Power size={16}/> Use this</>}
+              </button>
+            </div>
+          ))
+        )}
       </div>
     </div>
   );

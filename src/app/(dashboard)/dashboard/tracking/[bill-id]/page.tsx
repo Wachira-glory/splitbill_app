@@ -5,7 +5,6 @@ import { CheckCircle, Clock, RefreshCw, AlertCircle, ArrowLeft } from "lucide-re
 import { useRouter } from "next/navigation";
 import { supabase, getUndaAuthClient } from "@/lib/supabaseClient";
 
-// Helper to map Unda status to local UI states
 const mapUndaStatus = (undaStatus: string): string => {
     if (!undaStatus) return 'pending';
     const s = undaStatus.toUpperCase();
@@ -23,58 +22,56 @@ export default function PaymentTrackingPage({ params }: { params: Promise<{ "bil
     const [bill, setBill] = useState<any>(null);
     const [participants, setParticipants] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
+    const [accessDenied, setAccessDenied] = useState(false);
 
     const fetchBill = async (isSilent = false) => {
         try {
             if (!isSilent) setLoading(true);
             
-            // Get the pre-authenticated Unda client from your lib
-            const authSupa = await getUndaAuthClient();
+            // --- STEP 1: SECURITY CHECK (The Privacy Layer) ---
+            // Check if this slug exists in YOUR private mirror
+            const { data: mirrorData, error: mirrorError } = await supabase
+                .from("unda_bills_mirror")
+                .select("*")
+                .eq("slug", billId)
+                .maybeSingle();
 
-            // 1. Fetch Account Details
+            // If it doesn't exist in your mirror, RLS or the query will block you
+            if (!mirrorData) {
+                setAccessDenied(true);
+                setLoading(false);
+                return;
+            }
+
+            // --- STEP 2: FETCH REAL-TIME DATA FROM UNDA ---
+            const authSupa = await getUndaAuthClient();
             const { data: accData, error: accError } = await authSupa
                 .from("accounts")
                 .select("id, uid, data, balance")
                 .eq("slug", billId)
                 .single();
 
-            if (accError || !accData) {
-                console.error("DEBUG: Account Query Error:", accError);
-                return;
-            }
+            if (accError || !accData) return;
 
             setBill({
-                bill_name: accData.data?.name || "Bill",
-                total_amount: accData.data?.total_goal || 0,
+                bill_name: mirrorData.bill_name, // Use your private name
+                total_amount: mirrorData.total_goal, // Use your private goal
                 paybill: accData.uid
             });
 
-            // 2. Fetch Payments associated with this Account ID
             const { data: payments, error: payError } = await authSupa
                 .from("payments")
                 .select("*")
                 .or(`from_ac_id.eq.${accData.id},to_ac_id.eq.${accData.id}`);
 
-            if (payError) {
-                console.error("DEBUG: Payments Query Error:", payError);
-            }
-
             if (payments && payments.length > 0) {
                 const mapped = payments.map(p => {
                     let displayName = "Participant";
-
-                    // Name Extraction Logic
                     const dataName = p.data?.details?.customer_name || p.data?.details?.source || p.data?.customer_name;
                     const idataName = p.idata?.customer_name || p.idata?.full_name;
-                    const message = p.data?.details?.message || p.details || "";
-
-                    if (dataName) {
-                        displayName = dataName;
-                    } else if (idataName) {
-                        displayName = idataName;
-                    } else if (message.includes("SplitBill: ")) {
-                        displayName = message.split("SplitBill: ")[1];
-                    }
+                    
+                    if (dataName) displayName = dataName;
+                    else if (idataName) displayName = idataName;
 
                     return {
                         id: p.id,
@@ -86,19 +83,19 @@ export default function PaymentTrackingPage({ params }: { params: Promise<{ "bil
                 });
                 setParticipants(mapped);
             } else {
-                // Fallback to showing participants from account metadata if no payments exist yet
-                if (accData.data?.participants) {
-                    const fallback = accData.data.participants.map((p: any) => ({
+                // Fallback to participants saved in your private Mirror
+                if (mirrorData.raw_data?.participants) {
+                    const fallback = mirrorData.raw_data.participants.map((p: any) => ({
                         name: p.name,
                         phone: p.phone,
-                        amount: p.target_amount || p.amount,
+                        amount: p.amount,
                         status: 'pending'
                     }));
                     setParticipants(fallback);
                 }
             }
         } catch (err) {
-            console.error("DEBUG: Unexpected System Error:", err);
+            console.error("Tracking Error:", err);
         } finally {
             if (!isSilent) setLoading(false);
         }
@@ -107,19 +104,31 @@ export default function PaymentTrackingPage({ params }: { params: Promise<{ "bil
     useEffect(() => {
         if (billId) {
             fetchBill();
-            // Poll every 3 seconds for real-time status updates
             const interval = setInterval(() => fetchBill(true), 3000);
             return () => clearInterval(interval);
         }
     }, [billId]);
 
-    if (loading) return (
-        <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50">
-            <RefreshCw className="animate-spin text-purple-600 mb-4" size={48} />
-            <p className="text-gray-500 font-bold">Synchronizing Tracker...</p>
+    // UI for Access Denied
+    if (accessDenied) return (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-white p-6 text-center">
+            <AlertCircle className="text-red-500 mb-4" size={64} />
+            <h1 className="text-2xl font-black">Access Denied</h1>
+            <p className="text-gray-500 mt-2">You don't have permission to view this bill tracking page.</p>
+            <button onClick={() => router.push('/dashboard/bills')} className="mt-6 bg-black text-white px-8 py-3 rounded-2xl font-bold">
+                Back to My Bills
+            </button>
         </div>
     );
 
+    if (loading) return (
+        <div className="min-h-screen flex flex-col items-center justify-center bg-gray-50">
+            <RefreshCw className="animate-spin text-purple-600 mb-4" size={48} />
+            <p className="text-gray-500 font-bold tracking-widest uppercase text-xs">Verifying Access...</p>
+        </div>
+    );
+
+    // ... (Keep the rest of your JSX exactly the same)
     const paidCount = participants.filter(p => p.status === "paid").length;
     const progress = participants.length > 0 ? (paidCount / participants.length) * 100 : 0;
 

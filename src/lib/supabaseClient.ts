@@ -1,41 +1,47 @@
-import { createClient } from "@supabase/supabase-js";
+import { createClient } from '@supabase/supabase-js';
+import { createBrowserClient } from '@supabase/ssr';
 
-// 1. YOUR Project Credentials (Local Auth)
-const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+// 1. SPLITBILL CLIENT (Main App)
+// This uses the unique storageKey so it doesn't clash with other projects
+export const supabase = createBrowserClient(
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+  {
+    auth: {
+      persistSession: true,
+      storageKey: 'splitbill-v1-auth', // Must match your utils/server.ts
+      autoRefreshToken: true,
+      detectSessionInUrl: true,
+    }
+  }
+);
 
-// 2. UNDA Platform Credentials (Payments)
-const undaUrl = process.env.NEXT_PUBLIC_UNDA_SUPABASE_URL!;
-const undaAnonKey = process.env.NEXT_PUBLIC_UNDA_SUPABASE_ANON_KEY!;
-
-// EXPORT 1: The standard client for your local project
-export const supabase = createClient(supabaseUrl, supabaseAnonKey);
-
-// EXPORT 2: The function to get the authenticated Unda client
+// 2. UNDA ADMIN BRIDGE (Payment Gateway)
+// We use a function because we want a fresh, non-persisted instance every time
 export const getUndaAuthClient = async () => {
-  const response = await fetch(`${undaUrl}/auth/v1/token?grant_type=password`, {
-    method: "POST",
-    headers: { 
-      "Content-Type": "application/json", 
-      "apikey": undaAnonKey 
-    },
-    body: JSON.stringify({
-      email: process.env.NEXT_PUBLIC_UNDA_API_USERNAME,
-      password: process.env.NEXT_PUBLIC_UNDA_API_PASSWORD,
-    })
+  const undaSupa = createClient(
+    process.env.NEXT_PUBLIC_UNDA_SUPABASE_URL!,
+    process.env.NEXT_PUBLIC_UNDA_SUPABASE_ANON_KEY!,
+    {
+      auth: {
+        persistSession: false,     // CRITICAL: Does not save to Cookies/LocalStorage
+        autoRefreshToken: false,   // CRITICAL: Prevents background tasks from hijacking auth
+        detectSessionInUrl: false,
+      }
+    }
+  );
+
+  // Authenticate the bridge using your project credentials
+  // This happens in the background without affecting the user's login state
+  const { error } = await undaSupa.auth.signInWithPassword({
+    email: process.env.NEXT_PUBLIC_UNDA_API_USERNAME!,
+    password: process.env.NEXT_PUBLIC_UNDA_API_PASSWORD!,
   });
-  
-  const data = await response.json();
-  
-  if (!data.access_token) {
-    throw new Error("Failed to authenticate with Unda platform.");
+
+  if (error) {
+    console.error("Unda Bridge Authentication Failed:", error.message);
+    throw error;
   }
 
-  return createClient(undaUrl, undaAnonKey, {
-    global: { 
-      headers: { 
-        Authorization: `Bearer ${data.access_token}` 
-      } 
-    }
-  });
+  return undaSupa;
 };

@@ -1,25 +1,32 @@
-import { createServerClient } from "@supabase/ssr";
+import { createServerClient, type CookieOptions } from "@supabase/ssr";
 import { cookies } from "next/headers";
 
-
-//This page is mostly used when I do something like refresh a page, the token automaticaly attaches itself to the request
 export async function createClient() {
-  const cookieStore = await cookies(); // Access the browser's cookie jar
+  const cookieStore = await cookies();
 
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
     {
+      // FIX: Move storageKey inside the auth object
+      auth: {
+        storageKey: 'splitbill-v1-auth',
+        persistSession: true,
+      },
       cookies: {
-        // Reads cookies to see if the user has a "session ticket"
-        getAll() { return cookieStore.getAll(); },
-        // If Supabase updates the ticket, we save it back 
+        getAll() {
+          return cookieStore.getAll();
+        },
         setAll(cookiesToSet) {
           try {
             cookiesToSet.forEach(({ name, value, options }) =>
               cookieStore.set(name, value, options)
             );
-          } catch { /* Ignored in Server Components */ }
+          } catch {
+            // The `setAll` method was called from a Server Component.
+            // This can be ignored if you have middleware refreshing
+            // user sessions.
+          }
         },
       },
     }

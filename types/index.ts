@@ -75,3 +75,33 @@ export interface GeneratedData {
   mpesaTill?: string
   paymentLink: string
 }
+// types/index.ts
+
+export interface MirrorBill {
+    id: string;
+    slug: string;
+    bill_name: string;
+    total_goal: number;
+    owner_id: string;
+    raw_data?: any;
+    updated_at: string;
+}
+
+export interface UndaAccount {
+    id: number;
+    slug: string;
+    balance: number;
+    items?: any[];
+    data?: {
+        name?: string;
+        [key: string]: any;
+    };
+}
+
+export interface Participant {
+    id: string | number;
+    name: string;
+    phone: string;
+    amount: number;
+    status: 'paid' | 'pending' | 'failed';
+}

@@ -1,10 +1,9 @@
 "use client"
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { CreditCard, Power, Plus, CheckCircle2, Loader2, AlertTriangle } from 'lucide-react';
+import { CreditCard, Power, Plus, CheckCircle2, Loader2, AlertTriangle, Hash } from 'lucide-react';
 import { supabase, getUndaAuthClient } from "@/lib/supabaseClient"; 
 
-// Defined interface to replace 'any'
 interface Channel {
   id: number;
   uid: string;
@@ -12,8 +11,8 @@ interface Channel {
   idata: {
     is_default: boolean;
     owner_id: string;
+    display_uid?: string; // The clean paybill number
   };
-  created_at?: string;
 }
 
 export default function ChannelManager() {
@@ -22,187 +21,169 @@ export default function ChannelManager() {
   const [isCreating, setIsCreating] = useState(false);
   const [newUid, setNewUid] = useState(''); 
   const [newName, setNewName] = useState('');
-  const [authError, setAuthError] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  // 1. Defined fetchChannels ABOVE useEffect to fix "accessed before declared"
   const fetchChannels = useCallback(async () => {
     setLoading(true);
+    setError(null);
     try {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      if (!user) return setLoading(false);
 
       const authSupa = await getUndaAuthClient();
-      
-      const { data, error } = await authSupa
+      const { data, error: fetchError } = await authSupa
         .from('channels')
         .select('*')
-        .eq('p_id', 23) 
-        .order('created_at', { ascending: false });
+        .eq('p_id', 23)
+        .filter('idata->>owner_id', 'eq', user.id); 
 
-      if (error) throw error;
-      if (data) setChannels(data as Channel[]);
-    } catch (err) {
-      console.error("Fetch Error:", err);
-      setAuthError(true);
+      if (fetchError) throw fetchError;
+      setChannels(data || []);
+    } catch (err: any) {
+      setError(err.message);
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => {
-    fetchChannels();
-  }, [fetchChannels]);
+  useEffect(() => { fetchChannels(); }, [fetchChannels]);
 
-  // 2. Create or Update channel ownership
   const handleCreateChannel = async (e: React.FormEvent) => {
     e.preventDefault();
-    
     const { data: { user } } = await supabase.auth.getUser();
-    if (!user) return alert("Please login");
+    if (!user) return setError("Login required");
 
     setIsCreating(true);
+    setError(null);
     try {
       const authSupa = await getUndaAuthClient();
-
-      const { data: existing } = await authSupa
-        .from('channels')
-        .select('id, idata')
-        .eq('p_id', 23)
-        .eq('uid', newUid)
-        .maybeSingle();
-
-      if (existing) {
-        const { error: updateError } = await authSupa
-          .from('channels')
-          .update({
-            idata: { ...existing.idata, owner_id: user.id }
-          })
-          .eq('id', existing.id);
-        
-        if (updateError) throw updateError;
-      } else {
-        const { error: insertError } = await authSupa
-          .from('channels')
-          .insert([{
-            p_id: 23,
-            uid: newUid, 
-            name: newName,
-            provider: 'mpesa',
-            category: 'inbound',
-            mode: 'child',
-            parent_channel_id: 2, 
-            status: 'active',
-            idata: { 
-              is_default: false,
-              owner_id: user.id 
-            } 
-          }]);
-
-        if (insertError) throw insertError;
-      }
       
-      setNewUid('');
+      // We append user ID to the UID to avoid the 409 Duplicate Key error
+      const uniqueUid = `${newUid}-${user.id.substring(0, 8)}`;
+
+      const { error: insertError } = await authSupa
+        .from('channels')
+        .insert([{
+          p_id: 23,
+          uid: uniqueUid, 
+          name: newName,
+          provider: 'mpesa',
+          category: 'inbound',
+          mode: 'child',
+          parent_channel_id: 2, 
+          status: 'active',
+          idata: { 
+            is_default: false,
+            owner_id: user.id,
+            display_uid: newUid // Store clean number for the UI
+          } 
+        }]);
+
+      if (insertError) throw insertError;
+      
+      setNewUid(''); 
       setNewName('');
       fetchChannels();
-    } catch (err: unknown) {
-      const errorMessage = err instanceof Error ? err.message : "Unknown error";
-      console.error("Insert Error:", errorMessage);
-      alert("Failed to register channel: " + errorMessage);
+    } catch (err: any) {
+      // Handle the specific error if the user somehow submits twice
+      setError(err.message.includes('unique') ? "This paybill is already in your list." : err.message);
     } finally {
       setIsCreating(false);
     }
   };
 
-  // 3. Set Default Channel
   const setDefaultChannel = async (channelId: number) => {
     try {
-      const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
-
       const authSupa = await getUndaAuthClient();
+      
+      // Update all local state channels to false first to be fast in UI
+      const updatedChannels = channels.map(ch => ({
+        ...ch,
+        idata: { ...ch.idata, is_default: ch.id === channelId }
+      }));
+      setChannels(updatedChannels);
 
-      // Reset local channels to false in the database
+      // Perform background updates
       for (const ch of channels) {
-        await authSupa
-          .from('channels')
-          .update({ idata: { ...ch.idata, is_default: false } })
+        await authSupa.from('channels')
+          .update({ idata: { ...ch.idata, is_default: ch.id === channelId } })
           .eq('id', ch.id);
       }
-
-      // Set the target channel as default
-      const target = channels.find(c => c.id === channelId);
-      if (target) {
-        await authSupa
-          .from('channels')
-          .update({ 
-            idata: { ...target.idata, is_default: true } 
-          })
-          .eq('id', channelId);
-      }
-
-      fetchChannels();
-    } catch (err) {
-      console.error("Failed to swap active channel:", err);
+    } catch (err: any) {
+      setError("Failed to update default: " + err.message);
+      fetchChannels(); // Revert on error
     }
   };
 
-  if (authError) return (
-    <div className="p-10 text-center">
-      <AlertTriangle className="mx-auto text-red-500 mb-4" size={48} />
-      <h2 className="text-xl font-bold">Connection Error</h2>
-      <p className="text-slate-500">Could not sync with payment gateway.</p>
-    </div>
-  );
-
   return (
     <div className="max-w-2xl mx-auto p-6 space-y-8">
-      <div className="bg-white rounded-[2rem] p-8 shadow-xl border border-slate-100">
-        <h2 className="text-2xl font-black text-slate-900 mb-6 flex items-center gap-2">
-          <Plus className="text-purple-600" /> Register Paybill
-        </h2>
-        <form onSubmit={handleCreateChannel} className="space-y-4">
-          <input 
-            required placeholder="Business Name (e.g. My Shop)" 
-            className="w-full p-4 bg-slate-50 rounded-xl border-none outline-none font-bold text-slate-900"
-            value={newName} onChange={e => setNewName(e.target.value)}
-          />
-          <input 
-            required placeholder="M-Pesa Paybill / Till Number" 
-            className="w-full p-4 bg-slate-50 rounded-xl border-none outline-none font-mono font-bold text-slate-900"
-            value={newUid} onChange={e => setNewUid(e.target.value)}
-          />
-          <button 
-            disabled={isCreating}
-            className="w-full py-4 bg-slate-900 text-white font-black rounded-xl hover:bg-purple-600 transition-all flex items-center justify-center gap-2 disabled:opacity-50"
-          >
-            {isCreating ? <Loader2 className="animate-spin" /> : 'Add My Paybill'}
+      {error && (
+        <div className="bg-red-50 border border-red-100 p-4 rounded-2xl text-red-600 flex items-center gap-3 animate-shake">
+          <AlertTriangle size={20} /> <p className="font-bold text-sm">{error}</p>
+        </div>
+      )}
+
+      <div className="bg-white rounded-[2.5rem] p-10 shadow-xl border border-slate-100">
+        <div className="flex items-center gap-3 mb-8">
+          <div className="w-10 h-10 bg-purple-600 rounded-xl flex items-center justify-center text-white">
+            <Plus size={24} />
+          </div>
+          <h2 className="text-2xl font-black text-slate-900">Add Paybill</h2>
+        </div>
+        
+        <form onSubmit={handleCreateChannel} className="space-y-5">
+          <div className="space-y-1">
+            <label className="text-[10px] font-black text-slate-400 uppercase ml-4">Account Name</label>
+            <input required placeholder="Personal Till" className="w-full p-4 bg-slate-50 rounded-2xl outline-none font-bold border-2 border-transparent focus:border-purple-200 transition-all" value={newName} onChange={e => setNewName(e.target.value)} />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] font-black text-slate-400 uppercase ml-4">Till / Paybill Number</label>
+            <div className="relative">
+              <input required placeholder="123456" className="w-full p-4 bg-slate-50 rounded-2xl outline-none font-mono font-bold border-2 border-transparent focus:border-purple-200 transition-all" value={newUid} onChange={e => setNewUid(e.target.value)} />
+              <Hash className="absolute right-5 top-1/2 -translate-y-1/2 text-slate-300" size={18} />
+            </div>
+          </div>
+          <button disabled={isCreating} className="w-full py-5 bg-slate-900 text-white font-black rounded-2xl hover:bg-purple-600 disabled:opacity-50 transition-all flex items-center justify-center gap-2 shadow-lg shadow-slate-200">
+            {isCreating ? <Loader2 className="animate-spin" /> : 'Register Channel'}
           </button>
         </form>
       </div>
 
       <div className="space-y-4">
-        <h3 className="text-xs font-black text-slate-400 uppercase tracking-widest ml-2">My Merchant Channels</h3>
+        <h3 className="text-sm font-black text-slate-400 uppercase tracking-[0.2em] ml-6">Your Verified Channels</h3>
+        
         {loading ? (
-            <div className="flex justify-center py-10"><Loader2 className="animate-spin text-purple-600" /></div>
+          <div className="flex flex-col items-center justify-center py-20 gap-3">
+            <Loader2 className="animate-spin text-purple-600" size={32} />
+            <p className="text-xs font-bold text-slate-400 uppercase">Fetching your accounts...</p>
+          </div>
+        ) : channels.length === 0 ? (
+          <div className="bg-slate-50 rounded-[2.5rem] p-16 text-center border-2 border-dashed border-slate-200">
+            <p className="font-black text-slate-400">No channels found for this account.</p>
+          </div>
         ) : (
           channels.map(channel => (
-            <div key={channel.id} className={`p-6 rounded-[2rem] border-2 transition-all flex items-center justify-between ${channel.idata?.is_default ? 'bg-purple-50 border-purple-200 shadow-inner' : 'bg-white border-slate-50'}`}>
-              <div className="flex items-center gap-4">
-                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${channel.idata?.is_default ? 'bg-purple-600 text-white' : 'bg-slate-100 text-slate-400'}`}>
-                  <CreditCard size={24} />
+            <div key={channel.id} className={`p-6 rounded-[2.5rem] border-2 flex items-center justify-between transition-all duration-500 ${channel.idata?.is_default ? 'bg-white border-purple-500 shadow-xl shadow-purple-50' : 'bg-white border-slate-50 hover:border-slate-200'}`}>
+              <div className="flex items-center gap-5">
+                <div className={`w-14 h-14 rounded-2xl flex items-center justify-center ${channel.idata?.is_default ? 'bg-purple-600 text-white' : 'bg-slate-100 text-slate-400'}`}>
+                  <CreditCard size={28} />
                 </div>
                 <div>
-                  <p className="font-black text-slate-900">{channel.name}</p>
-                  <p className="text-xs font-mono font-bold text-slate-500">{channel.uid}</p>
+                  <p className="font-black text-xl text-slate-900 leading-tight">{channel.name}</p>
+                  <p className="text-xs font-mono font-bold text-purple-500">
+                    {channel.idata?.display_uid || channel.uid.split('-')[0]}
+                  </p>
                 </div>
               </div>
               <button 
-                type="button"
-                onClick={() => setDefaultChannel(channel.id)}
-                className={`flex items-center gap-2 px-6 py-3 rounded-xl font-black text-xs transition-all ${channel.idata?.is_default ? 'bg-emerald-500 text-white shadow-lg' : 'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}
+                onClick={() => setDefaultChannel(channel.id)} 
+                className={`px-6 py-3 rounded-xl font-black text-xs uppercase tracking-widest transition-all ${channel.idata?.is_default ? 'bg-emerald-500 text-white' : 'bg-slate-100 text-slate-500 hover:bg-slate-900 hover:text-white'}`}
               >
-                {channel.idata?.is_default ? <CheckCircle2 size={16}/> : <Power size={16}/>}
-                {channel.idata?.is_default ? 'Selected' : 'Use This'}
+                {channel.idata?.is_default ? (
+                  <span className="flex items-center gap-2"><CheckCircle2 size={16}/> Active</span>
+                ) : (
+                  <span className="flex items-center gap-2"><Power size={16}/> Use</span>
+                )}
               </button>
             </div>
           ))

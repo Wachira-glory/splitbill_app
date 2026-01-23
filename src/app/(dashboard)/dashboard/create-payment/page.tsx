@@ -3,7 +3,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { CheckCircle, Send, RefreshCw, ArrowLeft, Wallet } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-// Use the centralized library file
 import { supabase, getUndaAuthClient } from '@/lib/supabaseClient';
 
 const normalizePhoneNumber = (phone: string): string => {
@@ -41,21 +40,6 @@ const CreatePaymentPage = () => {
         getProfile();
     }, []);
 
-    const splitEqually = () => {
-        if (!totalAmount || !numberOfPeople) return;
-        const total = parseFloat(totalAmount);
-        const count = parseInt(numberOfPeople);
-        const roundedShare = Math.round(total / count);
-        setPhoneNumbers(prev => {
-            let currentSum = 0;
-            return prev.map((p, idx) => {
-                if (idx === prev.length - 1) return { ...p, amount: (total - currentSum).toString() };
-                currentSum += roundedShare;
-                return { ...p, amount: roundedShare.toString() };
-            });
-        });
-    };
-
     const fetchDefaultChannel = useCallback(async () => {
         try {
             const { data: { user } } = await supabase.auth.getUser();
@@ -63,10 +47,12 @@ const CreatePaymentPage = () => {
 
             const authSupa = await getUndaAuthClient();
             
+            // SECURITY: Only fetch channel where idata->owner_id matches the user
             const { data, error } = await authSupa
                 .from('channels')
                 .select('id, uid, name')
                 .eq('p_id', 23)
+                .filter('idata->>owner_id', 'eq', user.id)
                 .eq('idata->>is_default', 'true')
                 .maybeSingle();
 
@@ -80,56 +66,94 @@ const CreatePaymentPage = () => {
         }
     }, []);
 
-    useEffect(() => {
-        fetchDefaultChannel();
-    }, [fetchDefaultChannel]);
+    useEffect(() => { fetchDefaultChannel(); }, [fetchDefaultChannel]);
+
+
 
     const handleGenerateBill = async () => {
-        if (!billName || !totalAmount) return alert("Fill in details");
-        setLoading(true);
+    if (!billName || !totalAmount) return alert("Please fill in the bill name and total amount.");
+    setLoading(true);
 
-        try {
-            const { data: { user } } = await supabase.auth.getUser();
-            if (!user) throw new Error("Please login first");
-             
-            const authSupa = await getUndaAuthClient();
-            const billSlug = `bill-${Date.now()}`;
-
-            const { data: undaAccount, error: accountError } = await authSupa
-                .from('accounts')
-                .insert([{
-                    uid: billSlug,
-                    slug: billSlug,
-                    data: { 
-                        name: billName,
-                        total_goal: parseFloat(totalAmount),
-                        owner_id: user.id,
-                        owner_name: userProfile?.full_name || user.email,
-                        participants: phoneNumbers.map(p => ({
-                            name: p.name,
-                            phone: p.number,
-                            target_amount: parseFloat(p.amount)
-                        }))
-                    },
-                    type: 'bill',
-                    status: 'active',
-                    p_id: 23 
-                }])
-                .select('id')
-                .single();
-
-            if (accountError) throw accountError;
-
-            setActiveDbId(undaAccount.id);
-            setGeneratedBill({ id: billSlug, bill_name: billName, total_amount: totalAmount, participants: phoneNumbers });
-            setShowConfirmation(true);
-
-        } catch (err: any) {
-            alert(err.message);
-        } finally {
-            setLoading(false);
+    try {
+        // 1. FRESH USER CHECK (Prevents session bleed)
+        const { data: { user }, error: userError } = await supabase.auth.getUser();
+        
+        if (userError || !user) {
+            throw new Error("Session expired. Please log in again.");
         }
-    };
+
+        console.log("LOG: Creating bill for owner:", user.id);
+
+        const authSupa = await getUndaAuthClient();
+        const billSlug = `bill-${Date.now()}`;
+
+        // 2. SAVE TO YOUR PRIVATE MIRROR (This is what you see in the Ledger)
+        const { data: mirrorBill, error: mirrorError } = await supabase
+            .from('unda_bills_mirror')
+            .insert([{
+                slug: billSlug,
+                bill_name: billName,
+                total_goal: parseFloat(totalAmount),
+                owner_id: user.id, // Explicitly uses the fresh user ID
+                raw_data: {
+                    participants: phoneNumbers.map(p => ({
+                        name: p.name,
+                        phone: p.number,
+                        amount: p.amount
+                    }))
+                }
+            }])
+            .select()
+            .single();
+
+        if (mirrorError) throw new Error("Private Mirror Sync Failed: " + mirrorError.message);
+
+        // 3. SAVE TO SHARED UNDA TABLE (This handles the actual M-Pesa payments)
+        const { data: undaAccount, error: accountError } = await authSupa
+            .from('accounts')
+            .insert([{
+                uid: billSlug,
+                slug: billSlug,
+                p_id: 23,
+                type: 'bill',
+                status: 'active',
+                data: { 
+                    name: billName,
+                    total_goal: parseFloat(totalAmount),
+                    owner_id: user.id,
+                    owner_name: userProfile?.full_name || user.email
+                }
+            }])
+            .select('id')
+            .single();
+
+        if (accountError) throw new Error("Unda Payment Sync Failed: " + accountError.message);
+
+        // 4. Update individual items for tracking
+        await supabase.from('unda_items_mirror').insert(
+            phoneNumbers.map(p => ({
+                bill_id: mirrorBill.id,
+                amount: parseFloat(p.amount),
+                status: 'unpaid'
+            }))
+        );
+
+        setActiveDbId(undaAccount.id);
+        setGeneratedBill({ 
+            id: billSlug, 
+            bill_name: billName, 
+            total_amount: totalAmount, 
+            participants: phoneNumbers 
+        });
+        setShowConfirmation(true);
+
+    } catch (err: any) {
+        console.error("Critical Creation Error:", err);
+        alert(err.message);
+    } finally {
+        setLoading(false);
+    }
+};
 
     const handleSendIndividualSTK = async (participant: any) => {
         if (!activeDbId || !activeChannelId) return alert("System Error: Setup missing.");
@@ -155,6 +179,22 @@ const CreatePaymentPage = () => {
         } catch (error) {
             setSendingStatus(prev => ({ ...prev, [participant.number]: 'failed' }));
         }
+    };
+
+    // ... (rest of your useEffect for numberOfPeople and splitEqually logic stays the same)
+    const splitEqually = () => {
+        if (!totalAmount || !numberOfPeople) return;
+        const total = parseFloat(totalAmount);
+        const count = parseInt(numberOfPeople);
+        const roundedShare = Math.round(total / count);
+        setPhoneNumbers(prev => {
+            let currentSum = 0;
+            return prev.map((p, idx) => {
+                if (idx === prev.length - 1) return { ...p, amount: (total - currentSum).toString() };
+                currentSum += roundedShare;
+                return { ...p, amount: roundedShare.toString() };
+            });
+        });
     };
 
     useEffect(() => {
@@ -260,6 +300,3 @@ const CreatePaymentPage = () => {
 };
 
 export default CreatePaymentPage;
-
-
-
