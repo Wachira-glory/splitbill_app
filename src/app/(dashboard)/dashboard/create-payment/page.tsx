@@ -88,23 +88,25 @@ const CreatePaymentPage = () => {
         const billSlug = `bill-${Date.now()}`;
 
         // 2. SAVE TO YOUR PRIVATE MIRROR (This is what you see in the Ledger)
-        const { data: mirrorBill, error: mirrorError } = await supabase
-            .from('unda_bills_mirror')
-            .insert([{
-                slug: billSlug,
-                bill_name: billName,
-                total_goal: parseFloat(totalAmount),
-                owner_id: user.id, // Explicitly uses the fresh user ID
-                raw_data: {
-                    participants: phoneNumbers.map(p => ({
-                        name: p.name,
-                        phone: p.number,
-                        amount: p.amount
-                    }))
-                }
-            }])
-            .select()
-            .single();
+      const { data: mirrorBill, error: mirrorError } = await supabase
+    .from('app_bills')
+    .insert([{
+        slug: billSlug,
+        bill_name: billName,
+        total_goal: parseFloat(totalAmount),
+        owner_id: user.id,
+        owner_email: user.email, // ADD THIS LINE
+        status: 'active',
+        raw_data: {
+            participants: phoneNumbers.map(p => ({
+                name: p.name,
+                phone: p.number,
+                amount: p.amount
+            }))
+        }
+    }])
+    .select()
+    .single();
 
         if (mirrorError) throw new Error("Private Mirror Sync Failed: " + mirrorError.message);
 

@@ -32,6 +32,7 @@ export interface AuthContextType {
   signup: (email: string, password: string, name: string) => Promise<void>;
   signInWithGoogle: () => Promise<void>;
   logout: () => Promise<void>;
+  forgotPassword: (email: string) => Promise<void>; 
 }
 
 export interface PayLink {
@@ -104,4 +105,17 @@ export interface Participant {
     phone: string;
     amount: number;
     status: 'paid' | 'pending' | 'failed';
+}
+
+export interface AppBill {
+  id: string;
+  bill_name: string;
+  total_goal: number;
+  owner_email: string;
+  slug: string;
+  created_at: string;
+  items?: any[]; // Or a more specific PaymentItem type if you have one
+  real_collected?: number;
+  display_name?: string;
+  goal?: number;
 }

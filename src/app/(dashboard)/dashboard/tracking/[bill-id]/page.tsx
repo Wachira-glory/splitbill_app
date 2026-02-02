@@ -31,7 +31,7 @@ export default function PaymentTrackingPage({ params }: { params: Promise<{ "bil
             // --- STEP 1: SECURITY CHECK (The Privacy Layer) ---
             // Check if this slug exists in YOUR private mirror
             const { data: mirrorData, error: mirrorError } = await supabase
-                .from("unda_bills_mirror")
+                .from("app_bills")
                 .select("*")
                 .eq("slug", billId)
                 .maybeSingle();

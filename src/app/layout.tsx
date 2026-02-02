@@ -6,6 +6,7 @@ import { AuthProvider } from "@/lib/context/AuthContext"
 import { Toaster } from "react-hot-toast"
 import { ThemeProvider } from "@/lib/context/ThemeContext"
 
+
 const inter = Inter({ subsets: ["latin"] })
 
 export const metadata: Metadata = {
@@ -34,3 +35,20 @@ export default function RootLayout({
     </html>
   )
 }
+
+
+
+// import QueryProvider from "@/components/providers/QueryProvider";
+
+
+// export default function RootLayout({ children }: { children: React.ReactNode }) {
+//   return (
+//     <html lang="en">
+//       <body>
+//         <QueryProvider>
+//           {children}
+//         </QueryProvider>
+//       </body>
+//     </html>
+//   )
+// }

@@ -1,31 +1,52 @@
--- Create Bills Table
-CREATE TABLE IF NOT EXISTS public.unda_bills_mirror (
+-- New Parent Table: Bills
+CREATE TABLE IF NOT EXISTS public.app_bills (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    slug TEXT NOT NULL UNIQUE,
-    bill_name TEXT,
+    bill_name TEXT NOT NULL,
     total_goal DECIMAL DEFAULT 0,
-    owner_id UUID NOT NULL REFERENCES auth.users(id) DEFAULT auth.uid(),
-    raw_data JSONB DEFAULT '{}'::jsonb,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    owner_email TEXT NOT NULL, -- The "Email Claim" column
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- Create Items Table
-CREATE TABLE IF NOT EXISTS public.unda_items_mirror (
+-- New Child Table: Items
+CREATE TABLE IF NOT EXISTS public.app_items (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    bill_id UUID REFERENCES public.unda_bills_mirror(id) ON DELETE CASCADE,
+    bill_id UUID REFERENCES public.app_bills(id) ON DELETE CASCADE,
+    item_name TEXT,
     amount DECIMAL NOT NULL,
     status TEXT DEFAULT 'unpaid',
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
+ALTER TABLE public.app_bills ENABLE ROW LEVEL SECURITY;
 
--- Enable RLS and Allow ALL actions
-ALTER TABLE public.unda_bills_mirror ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public.unda_items_mirror ENABLE ROW LEVEL SECURITY;
+-- SELECT: Only see what matches your email
+CREATE POLICY "Users can view own bills"
+ON public.app_bills FOR SELECT
+USING (owner_email = current_setting('request.jwt.claims', true)::json->>'email');
 
-CREATE POLICY "Manage own bills" ON public.unda_bills_mirror FOR ALL USING (auth.uid() = owner_id);
-CREATE POLICY "Manage own items" ON public.unda_items_mirror FOR ALL USING (
-    EXISTS (SELECT 1 FROM public.unda_bills_mirror WHERE id = unda_items_mirror.bill_id AND owner_id = auth.uid())
+-- INSERT: Only add bills if you attach your own email
+CREATE POLICY "Users can insert own bills"
+ON public.app_bills FOR INSERT
+WITH CHECK (owner_email = current_setting('request.jwt.claims', true)::json->>'email');
+
+-- UPDATE: Only edit if you own it
+CREATE POLICY "Users can update own bills"
+ON public.app_bills FOR UPDATE
+USING (owner_email = current_setting('request.jwt.claims', true)::json->>'email');
+
+-- DELETE: Only delete if you own it
+CREATE POLICY "Users can delete own bills"
+ON public.app_bills FOR DELETE
+USING (owner_email = current_setting('request.jwt.claims', true)::json->>'email');
+ALTER TABLE public.app_items ENABLE ROW LEVEL SECURITY;
+
+-- Combine all actions into one logic: 
+-- "You can touch this item if you own the parent bill via email."
+CREATE POLICY "Users can manage items of their bills"
+ON public.app_items FOR ALL
+USING (
+  EXISTS (
+    SELECT 1 FROM public.app_bills 
+    WHERE public.app_bills.id = public.app_items.bill_id 
+    AND public.app_bills.owner_email = current_setting('request.jwt.claims', true)::json->>'email'
+  )
 );
-
--- REFRESH THE API (This fixes the 404)
-NOTIFY pgrst, 'reload schema';

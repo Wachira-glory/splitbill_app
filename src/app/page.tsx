@@ -5,11 +5,10 @@ import { useRouter } from "next/navigation"
 import { useAuth } from "@/lib/context/AuthContext"
 
 export default function HomePage() {
-  const { user, isLoading } = useAuth()
   const router = useRouter()
 
   useEffect(() => {
-    router.push("/landing")
+    router.replace("/landing")
   }, [router])
 
   return null

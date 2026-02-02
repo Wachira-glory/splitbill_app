@@ -1,7 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* The eslint block is no longer needed here in Next.js 16 */
+  /* Next.js 16 handles Proxy detection automatically */
+  reactStrictMode: true,
 };
 
 export default nextConfig;
