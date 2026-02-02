@@ -1,11 +1,9 @@
 import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 
-// Initialize the ADMIN client with the Service Role Key
-// This key should NEVER be used in "use client" files
 const supabaseAdmin = createClient(
-  "https://bufdseweassfymorwyyc.supabase.co",
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
+  process.env.NEXT_PUBLIC_SUPABASE_URL!,
+  process.env.NEXT_SUPABASE_SERVICE_ROLE_KEY!
 );
 
 export async function POST(req: Request) {
@@ -14,7 +12,6 @@ export async function POST(req: Request) {
 
     console.log(`[Admin Invite] Sending Supabase Magic Link to: ${email}`);
 
-    // 1. Administrative Invite via Supabase Auth
     const { data: authData, error: authError } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
       data: { 
         invited_to_team: teamId,
@@ -28,7 +25,6 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: authError.message }, { status: 400 });
     }
 
-    // 2. Log it in your 'invitations' table so the dashboard knows they are pending
     const { error: dbError } = await supabaseAdmin
       .from('invitations')
       .insert([{ 
@@ -49,4 +45,3 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
-
