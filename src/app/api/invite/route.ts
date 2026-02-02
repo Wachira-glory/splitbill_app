@@ -2,11 +2,19 @@ import { createClient } from '@supabase/supabase-js';
 import { NextResponse } from 'next/server';
 
 const supabaseAdmin = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_SUPABASE_SERVICE_ROLE_KEY!
+  process.env.NEXT_PUBLIC_SUPABASE_URL || '',
+  process.env.NEXT_SUPABASE_SERVICE_ROLE_KEY || ''
 );
 
 export async function POST(req: Request) {
+  // Runtime check - will fail at runtime if key is missing
+  if (!process.env.NEXT_SUPABASE_SERVICE_ROLE_KEY) {
+    return NextResponse.json(
+      { error: 'Service role key not configured' }, 
+      { status: 500 }
+    );
+  }
+
   try {
     const { email, teamName, teamId } = await req.json();
 
