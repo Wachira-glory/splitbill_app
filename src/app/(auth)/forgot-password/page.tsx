@@ -11,16 +11,20 @@ import { ArrowLeft, MailCheck } from "lucide-react"
 export default function ForgotPasswordPage() {
   const [email, setEmail] = useState("")
   const [isSubmitted, setIsSubmitted] = useState(false)
-  const { forgotPassword, isLoading } = useAuth()
+  const [isLoading, setIsLoading] = useState(false)
+  const { forgotPassword } = useAuth()
   const router = useRouter()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    setIsLoading(true)
     try {
       await forgotPassword(email)
       setIsSubmitted(true)
     } catch (err) {
       console.error("Reset request failed", err)
+    } finally {
+      setIsLoading(false)
     }
   }
 
