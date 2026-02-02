@@ -34,35 +34,52 @@ export default async function middleware(request: NextRequest) {
 
   console.log("Proxy Check - User:", !!user, "| Path:", url.pathname)
 
-  // Allow all auth routes to pass through (including /auth/callback)
+  // 1. Define Route Categories
   const isAuthRoute = url.pathname.startsWith('/auth/')
   const isDashboardRoute = url.pathname.startsWith('/dashboard')
-  const isAuthPage = url.pathname === '/login' || url.pathname === '/signup'
   const isCheckEmailPage = url.pathname === '/check-email'
+  
+  // Public pages that anyone can see
+  const isPublicPage = url.pathname === '/login' || 
+                       url.pathname === '/signup' || 
+                       url.pathname === '/landing' || 
+                       url.pathname === '/'
 
-  // Let all auth-related routes pass through without interference
+  // 2. Allow Internal Auth & Email Check routes to pass through
   if (isAuthRoute || isCheckEmailPage) {
     return response
   }
 
-  // Protect dashboard routes - redirect to login if not authenticated
+  // 3. Handle Public Pages (Landing, Login, Signup)
+  if (isPublicPage) {
+    // If user is already logged in, don't show landing/login - send to dashboard
+    if (user) {
+      console.log("User logged in - skipping public page:", url.pathname)
+      return NextResponse.redirect(new URL('/dashboard', request.url))
+    }
+    // If not logged in, they can see the landing/login/signup pages
+    return response
+  }
+
+  // 4. Protect Dashboard (and any other internal routes)
   if (!user && isDashboardRoute) {
-    console.log("Protecting dashboard - redirecting to login")
+    console.log("Unauthorized - redirecting to login")
     return NextResponse.redirect(new URL('/login', request.url))
   }
 
-  // If logged in and trying to access login/signup, redirect to dashboard
-  if (user && isAuthPage) {
-    console.log("User already logged in - redirecting to dashboard")
-    return NextResponse.redirect(new URL('/dashboard', request.url))
-  }
-
-  // Allow the request to continue
+  // 5. Default Fallback
   return response
 }
 
 export const config = {
   matcher: [
+    /*
+     * Match all request paths except for the ones starting with:
+     * - _next/static (static files)
+     * - _next/image (image optimization files)
+     * - favicon.ico (favicon file)
+     * - public files (svg, png, jpg, etc)
+     */
     '/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)',
   ],
 }
